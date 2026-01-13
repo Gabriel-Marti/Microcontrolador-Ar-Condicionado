@@ -1,0 +1,365 @@
+<!DOCTYPE HTML>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <title>Dashboard Gestão CMMS</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/paho-mqtt/1.0.1/mqttws31.min.js"></script>
+  
+  <style>
+    /* --- ESTILOS GERAIS (Igual ao anterior) --- */
+    body { font-family: 'Segoe UI', sans-serif; background: #eef2f3; padding: 20px; margin: 0; }
+    h2 { text-align: center; color: #333; }
+    #dashboard { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; max-width: 900px; margin: 0 auto; }
+    @media (max-width: 600px) { #dashboard { grid-template-columns: 1fr; } }
+
+    /* --- ESTILO DO CONTROLADOR --- */
+    .ac-card {
+      background: white; padding: 20px;
+      border-radius: 15px; box-shadow: 0 4px 10px rgba(0,0,0,0.1);
+      text-align: center; position: relative;
+    }
+    .exemplo-card { border: 2px dashed #bbb; opacity: 1; } 
+
+    .card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; }
+    .card-title { font-size: 1.2rem; font-weight: bold; color: #444; margin: 0; }
+    
+    .btn-mais {
+      width: 30px; height: 30px; background-color: #3498db; color: white;
+      border: none; border-radius: 5px; font-weight: bold; font-size: 18px; cursor: pointer;
+    }
+    .btn-mais:hover { background-color: #2980b9; }
+
+    /* Dados e Status */
+    .sensor-box { display: flex; justify-content: space-around; background: #f8f9fa; padding: 10px; border-radius: 8px; margin-bottom: 15px; }
+    .sensor-val { font-size: 1.5rem; font-weight: bold; color: #2c3e50; }
+    .sensor-label { font-size: 0.8rem; color: #777; display: block; }
+    .status-text { font-weight: bold; }
+    .ligado { color: #27ae60; } .desligado { color: #c0392b; } .neutro { color: #7f8c8d; }
+
+    .btn-group { display: flex; gap: 10px; }
+    .btn-cmd { flex: 1; padding: 10px; border: none; border-radius: 5px; cursor: pointer; color: white; font-weight: bold; }
+    .btn-on { background: #27ae60; } .btn-off { background: #c0392b; }
+
+    /* --- ÁREA DE DETALHES GERAIS --- */
+    .detalhes-painel {
+      display: none; 
+      margin-top: 20px; padding-top: 15px; border-top: 1px solid #eee; text-align: left;
+      animation: fadeIn 0.3s;
+    }
+
+    /* --- NOVO: ESTILO DOS REGISTROS (Acordeão) --- */
+    .lista-manutencao { margin-top: 10px; display: flex; flex-direction: column; gap: 8px; }
+
+    .registro-item {
+      border: 1px solid #ddd; border-left: 4px solid #3498db;
+      border-radius: 4px; overflow: hidden;
+    }
+
+    .registro-resumo {
+      background: #f9f9f9; padding: 10px; cursor: pointer;
+      font-size: 0.9rem; color: #444; font-weight: 600;
+      display: flex; justify-content: space-between;
+    }
+    .registro-resumo:hover { background: #f1f1f1; }
+    
+    .registro-detalhe {
+      display: none; /* Escondido por padrão */
+      padding: 10px; background: #fff;
+    }
+
+    .nota-texto {
+      width: 100%; height: 60px;
+      background-color: #fff9c4; border: 1px solid #f1c40f;
+      padding: 8px; font-family: 'Courier New', monospace; font-size: 0.85rem;
+      resize: vertical; box-sizing: border-box; outline: none;
+    }
+
+    /* Formulário para adicionar */
+    .form-add { background: #ecf0f1; padding: 10px; border-radius: 5px; margin-bottom: 10px; }
+    .input-mini { padding: 5px; border: 1px solid #ccc; border-radius: 3px; width: 30%; }
+    .input-titulo { padding: 5px; border: 1px solid #ccc; border-radius: 3px; width: 45%; }
+    .btn-add { padding: 5px 10px; background: #27ae60; color: white; border: none; border-radius: 3px; cursor: pointer; }
+
+    @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+  </style>
+</head>
+<body>
+
+  <h2>Sistema CMMS - IoT</h2>
+  <p style="text-align:center; color:#666;" id="msg-sistema">Iniciando...</p>
+  
+  <div id="dashboard"></div>
+
+<script>
+// --- CONFIGURAÇÃO MQTT ---
+const host = "broker.hivemq.com";
+const port = 8000;
+const clientID = "dash_oop_" + parseInt(Math.random() * 1000);
+const client = new Paho.MQTT.Client(host, port, clientID);
+
+let dispositivosAtivos = {}; 
+const TOPICO_DISCOVERY = "sistema/global/descobrir";
+
+// ==========================================
+// 1. CLASSE DE REGISTRO (A NOVIDADE)
+// Representa uma única manutenção
+// ==========================================
+class RegistroManutencao {
+  constructor(idPai, data, titulo, detalheTexto) {
+    this.idUnico = "reg-" + Math.floor(Math.random() * 100000);
+    this.idPai = idPai; // ID do Ar Condicionado dono deste registro
+    this.data = data;
+    this.titulo = titulo;
+    this.detalheTexto = detalheTexto;
+  }
+
+  // Gera o HTML deste registro específico
+  gerarHTML() {
+    return `
+      <div class="registro-item">
+        <div class="registro-resumo" onclick="toggleRegistro('${this.idUnico}')">
+           <span>📅 ${this.data}: ${this.titulo}</span>
+           <span>▼</span>
+        </div>
+        
+        <div id="${this.idUnico}" class="registro-detalhe">
+           <textarea class="nota-texto" placeholder="Detalhes técnicos...">${this.detalheTexto}</textarea>
+           <div style="text-align:right; margin-top:5px;">
+             <small style="color:#888;">Registro salvo automaticamente</small>
+           </div>
+        </div>
+      </div>
+    `;
+  }
+}
+
+// ==========================================
+// 2. CLASSE DO CONTROLADOR AC
+// ==========================================
+class ControladorAC {
+  constructor(dados, ehExemplo = false) {
+    this.id = dados.id;
+    this.nome = dados.nome;
+    this.prefixo = dados.prefixo;
+    this.ehExemplo = ehExemplo;
+
+    // LISTA DE OBJETOS DE REGISTRO
+    this.listaRegistros = [];
+
+    this.topicoTemp = this.prefixo + "/temperatura";
+    this.topicoUmid = this.prefixo + "/umidade";
+    this.topicoStatus = this.prefixo + "/status";
+    this.topicoEstado = this.prefixo + "/estado";
+    this.topicoComando = this.prefixo + "/comando";
+
+    this.desenharInterface();
+    if (!this.ehExemplo) this.inscreverTopicos();
+  }
+
+  // Método para criar um novo objeto e atualizar a tela
+  adicionarRegistro(data, titulo, texto) {
+    const novoReg = new RegistroManutencao(this.id, data, titulo, texto);
+    this.listaRegistros.push(novoReg);
+    this.renderizarListaRegistros();
+  }
+
+  // Redesenha apenas a área da lista (sem recarregar o card todo)
+  renderizarListaRegistros() {
+    const containerLista = document.getElementById(`lista-container-${this.id}`);
+    if(!containerLista) return;
+
+    // Limpa e recria o HTML baseado nos objetos
+    containerLista.innerHTML = "";
+    this.listaRegistros.forEach(reg => {
+        containerLista.innerHTML += reg.gerarHTML();
+    });
+  }
+
+  desenharInterface() {
+    if(document.getElementById("card-" + this.id)) return;
+
+    const container = document.getElementById("dashboard");
+    const classeExtra = this.ehExemplo ? "exemplo-card" : "";
+    let textoEst = this.ehExemplo ? "EXEMPLO" : "DESLIGADO";
+    let corEst = this.ehExemplo ? "neutro" : "desligado";
+
+    const cardHTML = `
+      <div class="ac-card ${classeExtra}" id="card-${this.id}">
+        
+        <div class="card-header">
+           <div class="card-title">❄️ ${this.nome}</div>
+           <button class="btn-mais" onclick="toggleDetalhes('${this.id}', this)">+</button>
+        </div>
+        
+        <div class="sensor-box">
+          <div><span class="sensor-label">Temp</span><span class="sensor-val" id="t-${this.id}">--</span>°C</div>
+          <div><span class="sensor-label">Umid</span><span class="sensor-val" id="u-${this.id}">--</span>%</div>
+        </div>
+
+        <div class="status-area" style="margin-bottom:15px">
+            <span class="sensor-label" style="display:inline;">Estado: </span>
+            <span class="status-text ${corEst}" id="st-${this.id}">${textoEst}</span>
+        </div>
+
+        <div class="btn-group">
+          <button class="btn-cmd btn-on" onclick="enviarCmd('${this.topicoComando}', 'LIGAR')">LIGAR</button>
+          <button class="btn-cmd btn-off" onclick="enviarCmd('${this.topicoComando}', 'DESLIGAR')">DESLIGAR</button>
+        </div>
+
+        <div id="detalhes-${this.id}" class="detalhes-painel">
+            <span class="sensor-label" style="margin-bottom:5px;">📝 Histórico de Manutenção</span>
+            
+            <div class="form-add">
+                <input type="text" id="add-data-${this.id}" class="input-mini" placeholder="Data (ex: 12/01)">
+                <input type="text" id="add-titulo-${this.id}" class="input-titulo" placeholder="O que houve?">
+                <button class="btn-add" onclick="triggerAddRegistro('${this.id}')">Add</button>
+            </div>
+
+            <div id="lista-container-${this.id}" class="lista-manutencao"></div>
+
+        </div>
+      </div>
+    `;
+    container.innerHTML += cardHTML;
+  }
+
+  removerInterface() {
+    if (this.ehExemplo) return;
+    const el = document.getElementById("card-" + this.id);
+    if (el) el.remove();
+    delete dispositivosAtivos[this.topicoStatus]; 
+    delete dispositivosAtivos[this.topicoTemp];
+    delete dispositivosAtivos[this.topicoUmid];
+    delete dispositivosAtivos[this.topicoEstado];
+  }
+
+  inscreverTopicos() {
+    if (client.isConnected()) {
+        client.subscribe(this.topicoTemp);
+        client.subscribe(this.topicoUmid);
+        client.subscribe(this.topicoStatus);
+        client.subscribe(this.topicoEstado);
+    }
+    dispositivosAtivos[this.topicoTemp] = { obj: this, tipo: 'temp' };
+    dispositivosAtivos[this.topicoUmid] = { obj: this, tipo: 'umid' };
+    dispositivosAtivos[this.topicoStatus] = { obj: this, tipo: 'status' };
+    dispositivosAtivos[this.topicoEstado] = { obj: this, tipo: 'estadoReal' };
+  }
+
+  atualizarDados(tipo, valor) {
+    if (tipo === 'temp') document.getElementById(`t-${this.id}`).innerText = valor;
+    if (tipo === 'umid') document.getElementById(`u-${this.id}`).innerText = valor;
+    if (tipo === 'status' && valor === "OFFLINE") this.removerInterface();
+    if (tipo === 'estadoReal') {
+        const el = document.getElementById(`st-${this.id}`);
+        if (valor == "1") { el.innerText = "LIGADO"; el.className = "status-text ligado"; } 
+        else { el.innerText = "DESLIGADO"; el.className = "status-text desligado"; }
+    }
+  }
+}
+
+// ==========================================
+// FUNÇÕES AUXILIARES GLOBAIS
+// ==========================================
+
+// Encontra o objeto certo e manda ele adicionar o registro
+function triggerAddRegistro(idAC) {
+    // Procura no mapa de dispositivos ou verifica se é o exemplo
+    let controlador = null;
+    
+    // Verifica se é o exemplo
+    if(idAC === "exemplo") {
+        controlador = exemploControlador; // Variável global criada no final
+    } else {
+        // Gambiarra necessária pois não salvei todos os objetos num mapa simples por ID
+        // Num app real, teríamos um mapa: listaControladores[id] = objeto
+        // Aqui vou procurar nos tópicos (não é o ideal mas funciona pro protótipo)
+        for(let key in dispositivosAtivos) {
+            if(dispositivosAtivos[key].obj.id === idAC) {
+                controlador = dispositivosAtivos[key].obj;
+                break;
+            }
+        }
+    }
+
+    if(controlador) {
+        const data = document.getElementById(`add-data-${idAC}`).value;
+        const titulo = document.getElementById(`add-titulo-${idAC}`).value;
+        if(data && titulo) {
+            controlador.adicionarRegistro(data, titulo, "Clique para editar detalhes...");
+            // Limpa inputs
+            document.getElementById(`add-data-${idAC}`).value = "";
+            document.getElementById(`add-titulo-${idAC}`).value = "";
+        } else {
+            alert("Preencha data e título!");
+        }
+    }
+}
+
+// Abre/Fecha o registro específico (Acordeão)
+function toggleRegistro(idReg) {
+    const el = document.getElementById(idReg);
+    if(el.style.display === "block") {
+        el.style.display = "none";
+    } else {
+        el.style.display = "block";
+    }
+}
+
+// Abre/Fecha painel geral
+function toggleDetalhes(id, btn) {
+    var painel = document.getElementById("detalhes-" + id);
+    if (painel.style.display === "block") {
+        painel.style.display = "none";
+        btn.innerText = "+"; 
+        btn.style.backgroundColor = "#3498db";
+    } else {
+        painel.style.display = "block";
+        btn.innerText = "-"; 
+        btn.style.backgroundColor = "#7f8c8d";
+    }
+}
+
+// --- MQTT PADRÃO ---
+client.onMessageArrived = (message) => {
+  const topico = message.destinationName;
+  const msg = message.payloadString;
+
+  if (topico === TOPICO_DISCOVERY) {
+    try {
+      const dados = JSON.parse(msg);
+      if (!document.getElementById("card-" + dados.id)) {
+        // Importante: Salvar referencia num mapa global para achar depois
+        const novoCtrl = new ControladorAC(dados, false); 
+        // Hack para registrar no mapa de busca por ID
+        dispositivosAtivos["id_ref_" + dados.id] = { obj: novoCtrl, tipo: 'ref' };
+      }
+    } catch(e) { console.error(e); }
+  } 
+  else if (dispositivosAtivos[topico]) {
+    dispositivosAtivos[topico].obj.atualizarDados(dispositivosAtivos[topico].tipo, msg);
+  }
+};
+
+client.connect({ onSuccess: () => {
+  document.getElementById("msg-sistema").innerText = "🟢 Sistema Online";
+  client.subscribe(TOPICO_DISCOVERY);
+}});
+
+function enviarCmd(topico, cmd) {
+  if (topico.includes("dummy")) { alert("Exemplo Visual!"); return; }
+  message = new Paho.MQTT.Message(cmd);
+  message.destinationName = topico;
+  client.send(message);
+}
+
+// --- INSTANCIANDO O EXEMPLO ---
+const exemploControlador = new ControladorAC({ id: "exemplo", nome: "AC Recepção (Exemplo)", prefixo: "dummy" }, true);
+
+// Populando o exemplo com dados fake usando POO
+exemploControlador.adicionarRegistro("10/02", "Troca de Filtro", "Técnico Antônio trocou o filtro HEPA.\nPróxima troca em 6 meses.");
+exemploControlador.adicionarRegistro("32/02", "NOTA IMPORTANTE", "Esse exemplo representa a ideia de que cada microcontrolador se coencte a um calendário de manutenção (a exibição do calendário será por uma api apropriada) e exiba o relatório, ao se conectar a um banco de dados independente do objeto instanciado, que serviria como backup para que o registro não seja perdido caso a conexão entre o esp e o servidor caia, mas esse registro deve ser editável por meio dessa conexão no registro acessível pelo objeto");
+
+</script>
+</body>
+</html>
