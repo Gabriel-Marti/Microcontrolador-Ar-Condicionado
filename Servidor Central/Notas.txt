@@ -1,1 +1,6 @@
 
+Site apresentando o projeto
+https://arabian-nights-six.vercel.app/#planos
+
+repositório do site
+https://github.com/FelipeCouto01/arabian-nights/tree/main
